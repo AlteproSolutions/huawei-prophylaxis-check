@@ -1,91 +1,245 @@
 from ciscoconfparse import CiscoConfParse
 from openpyxl import Workbook
-import re
 from scrapli import Scrapli
+from rich import inspect
+from rich import print as rprint
+import os
+import sys
+import re
+from dotenv import load_dotenv
+from scrapli import AsyncScrapli
+from scrapli.exceptions import ScrapliException
+import concurrent.futures
+import pandas as pd
 
-def check_config(parse):
-    keywords = [
-        "dhcp snooping enable",
-        "info-center loghost 10.255.255.50 channel 4 local-time",
-        "snmp-agent target-host trap address udp-domain 10.255.10.20",
-        "local-user admin",
-        "local-user admin service-type ssh",
-        "ftp server enable",
-    ]
+def create_inventory(hosts, username, password):
 
-    results = []
-    for keyword in keywords:
-        if parse.find_objects(keyword):
-            results.append(True)
+    inventory = []
+
+    for host in hosts:
+        inventory.append({
+            "host": host.strip(),
+            "auth_username": username,
+            "auth_password": password,
+            "auth_strict_key": False,
+            "platform": "huawei_vrp",
+            "transport": "ssh2"
+        })
+    return inventory
+
+def perform_live_checks(device_connection):
+    live_checks = {}
+
+    # Check STP info
+    response = device_connection.send_command("display stp active")
+    output = response.result
+    live_checks["get_stp_info"] = "BPDU-Protection     :Enabled" in output
+
+    # Check no BPDU error-down
+    response = device_connection.send_command("display error-down recovery")
+    output = response.result
+    live_checks["check_no_bpdu_error_down"] = "Info: No error-down interface exists." in output
+
+    # Check NTP status
+    response = device_connection.send_command("display ntp status | include clock status")
+    output = response.result
+    live_checks["check_ntp_status_synchronized"] = "clock status: synchronized" in output
+
+    # Check HTTP status
+    response = device_connection.send_command("display http server")
+    output = response.result
+    live_checks["check_http_status_disabled"] = "HTTP Server Status              : disabled" and "HTTP Secure-server Status       : disabled" in output
+
+    return live_checks
+
+
+def connect(device):
+    device_connection = Scrapli(**device).open()
+    return device_connection
+
+
+def get_hostname(config):
+    for line in config.splitlines():
+        if line.startswith("sysname"):
+            hostname = line.split()[1]
+            return hostname
+    return None
+
+def check_config(config, global_lines_to_check):
+
+    result = {}
+    confparse = CiscoConfParse(config.splitlines())
+    for line in global_lines_to_check:
+        if confparse.find_objects(line, exactmatch=True):
+            result[line] = True
         else:
-            results.append(False)
-    return results
+            result[line] = False
 
-def extract_hostname(parse):
-    hostname_obj = parse.find_objects(r"sysname (\S+)")
-
-    hostname = hostname_obj[0].re_match(r"sysname (\S+)") if hostname_obj else ""
-
-    return hostname
-
-def get_stp_info(device):
-    response = device.send_command("display stp active")
-    output = response.result
-    print(output)
-    bpdu_protection = "BPDU-Protection     :Enabled" in output
-    #stp_type = re.search(r"STP Type\s+:\s+(\S+)", output)
-
-    return bpdu_protection, stp_type.group(1) if stp_type else ""
-
-def check_no_bpdu_error_down(device):
-    response = device.send_command("display error-down recovery")
-    output = response.result
-    print(output)
-    return "Info: No error-down interface exists." in output
-
-def check_ntp_status_ok(device):
-    response = device.send_command("display ntp status | include clock status")
-    output = response.result
-    print(output)
-    return "clock status: synchronized" in output
-
-def check_http_status_disabled(device):
-    response = device.send_command("display http server")
-    output = response.result
-    print(output)
-    return "HTTP Server Status              : disabled" and "HTTP Secure-server Status       : disabled" in output
+    return result
 
 
+def check_interfaces_config(config, interfaces_lines_to_check):
 
-def create_excel(switch_data):
+    result = {}
+    confparse = CiscoConfParse(config.splitlines())
+    for line in global_lines_to_check:
+        if confparse.find_objects(line, exactmatch=True):
+            result[line] = True
+        else:
+            result[line] = False
+
+    return result
+
+def save_to_excel(data, output_file):
+    # Create a new workbook
     wb = Workbook()
     ws = wb.active
+    ws.title = "Outputs"
 
-    ws.append(["Hostname"] + [f"Command {i+1}" for i in range(6)] + ["BPDU Protection", "STP Type"])
+    # Set column headers
+    headers = ['Zařízení', 'IP adresa']
+    for device in data:
+        for ip, info in device.items():
+            for check_name in info['check_results']:
+                if check_name not in headers:
+                    headers.append(check_name)
 
-    for data in switch_data:
-        ws.append(data)
+    for col_num, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col_num).value = header
 
-    wb.save("switch_config_results.xlsx")
 
-def connect(device_info):
-    device = Scrapli(**device_info)
-    device.open()
-    return device
+    # Add data to the worksheet
+    for row_num, device in enumerate(data, 2):
+        for ip, info in device.items():
+            ws.cell(row=row_num, column=1).value = info['hostname']
+            ws.cell(row=row_num, column=2).value = ip
+            for col_num, header in enumerate(headers[2:], 3):
+                ws.cell(row=row_num, column=col_num).value = info['check_results'].get(header, None)
+
+    # Uložení sešitu do souboru
+    wb.save(output_file)
+
+
+def connect_to_device(device):
+    try:
+        conn = Scrapli(**device)
+        conn.open()
+        return conn
+    except Exception as e:
+        pass
+
+def get_config(connected_device):
+    try:
+        return connected_device.send_command("display current-configuration").result
+
+    except Exception as e:
+        pass    
+
+
+def process_device(device, global_lines_to_check, commands_to_get_output):
+
+    # Get config and info about device
+    conn = connect_to_device(device)
+
+    try: 
+        device_config = get_config(conn)
+
+        with open(f'{device_path}/config.txt', mode="w") as device_config_file:
+            device_config_file.write(device_config)
+
+        print(f"Config saved for {device}")
+
+    except Exception as e:print(f"Failed when getting config from {device}")
+
+    hostname = get_hostname(device_config)
+    ip = device.get("host")
+    device_path = f"{absolute_path}/output/{hostname}_" + f'({ip})'
+
+    if not os.path.exists(device_path):
+        os.mkdir(device_path)
+
+    for command in commands_to_get_output:
+        try:
+            response = conn.send_command(command)
+
+            with open(f'{device_path}/{command.strip().replace(" ", "_")}-{hostname}_({ip}).txt', mode="w") as commandfile:
+                commandfile.write(response.result)
+
+        except:
+            print("Device " + hostname + f' ({ip}) - failed when getting ' + command)
+            continue
+
+
+
+
+    live_checks = perform_live_checks(conn)
+    config_checks = check_config(device_config, global_lines_to_check)
+
+    checks_results = {}
+    checks_results.update(live_checks)
+    checks_results.update(config_checks)
+
+
+    device_data = {
+        ip: {
+            'hostname': hostname,
+            'config': device_config,
+            'check_results': checks_results,
+        }
+    }
+
+    return device_data
+
+
+
 
 if __name__ == "__main__":
-    devices = []  # List of device connection information
-    switch_data = []
 
-    for device_info in devices:
-        device = connect(device_info)
-        config_text = device.send_command("display current-configuration").result
-        parse = CiscoConfParse(config_text.splitlines())
+    # Load Environment Variables
+    absolute_path = os.path.dirname(os.path.realpath(__file__))
+    load_dotenv(absolute_path + "/.env")
+    username = os.environ.get("USER")
+    password = os.environ.get("PASSWORD")
+    
+    if (username or password) is None:
+        print('U need to create .env file in root directory of the script and add USER = "YOURUSER" and PASSWORD = "YOURPASSWORD"')
+        sys.exit(1)
 
-        hostname = extract_hostname(parse)
-        results = check_config(parse)
-        bpdu_protection, stp_type = get_stp_info(device)
+    #Create output folder
+    if not os.path.exists(f'{absolute_path}/output'): os.mkdir(f'{absolute_path}/output')
 
-        switch_data.append([hostname] + results + [bpdu_protection, stp_type])
+    # Read hosts
+    with open(f'{absolute_path}/config/hosts.txt', mode="r") as hostsFile:
+        hosts = hostsFile.readlines()
 
-    create_excel(switch_data)
+    # Read commands
+    with open(f'{absolute_path}/config/commands.txt', mode="r") as f:
+        commands_to_get_ouput = f.read().splitlines()
+
+    # Read lines to check
+    with open(f'{absolute_path}/config/global_lines_to_check.txt', mode="r") as f:
+        global_lines_to_check = f.read().splitlines()
+
+    print("Commands: ", commands_to_get_ouput)
+    print("device_connections : ", list(map(lambda x:x.strip(),hosts)))
+
+    inventory = create_inventory(hosts, username, password)
+
+    devices_data = []
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(process_device, device, global_lines_to_check, commands_to_get_ouput) for device in inventory]
+        concurrent.futures.wait(futures)
+
+        for future in concurrent.futures.as_completed(futures):
+            devices_data.append(future.result())
+            
+    rprint(devices_data)
+    inspect(devices_data)
+
+    save_to_excel(devices_data, absolute_path + "/output/commands_check.xlsx")
+
+
+    for object in devices_data:
+        rprint(object)
+        inspect(object)

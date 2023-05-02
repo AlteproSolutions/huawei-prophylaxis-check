@@ -1,0 +1,2 @@
+dhcp snooping enable
+info-center loghost 10.255.255.50 channel 4 local-time
