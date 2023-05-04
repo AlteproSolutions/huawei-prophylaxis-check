@@ -11,6 +11,7 @@ from scrapli.exceptions import ScrapliException
 import concurrent.futures
 import pandas as pd
 from tqdm.contrib.concurrent import thread_map
+from netmiko.ssh_autodetect import SSHDetect
 
 #Cisco Catalyst variables
 CiscoCatalystAccessInterfaceDistinguisher = "switchport mode access"
@@ -30,6 +31,21 @@ HuaweiCeHybridInterfaceDistinguisher = "port trunk pvid vlan"
 HuaweiSAccessInterfaceDistinguisher = "port link-type access"
 HuaweiSTrunkInterfaceDistinguisher = "port link-type trunk"
 HuaweiSHybridInterfaceDistinguisher = "port link-type hybrid"
+
+
+def autodetect_device(host, username, password):
+    device = {
+    'device_type': 'autodetect',
+    'ip': host,
+    'username': username,
+    'password': password,
+}
+    
+    guesser = SSHDetect(**device)
+    best_match = guesser.autodetect()
+    print(best_match) # Name of the best device_type to use further
+    print(guesser.potential_matches) # Dictionary of the whole matching result
+
 
 
 
