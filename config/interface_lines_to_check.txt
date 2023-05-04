@@ -1,0 +1,3 @@
+loopback-detect enable
+unicast-supression 10
+dhcp snooping enable

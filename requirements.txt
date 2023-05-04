@@ -1,0 +1,10 @@
+ciscoconfparse
+openpyxl
+scrapli
+rich
+python-dotenv
+concurrent-futures
+pandas
+tqdm
+scrapli
+scrapli-community

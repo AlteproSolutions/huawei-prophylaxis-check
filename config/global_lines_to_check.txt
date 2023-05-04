@@ -1,2 +1,3 @@
 dhcp snooping enable
 info-center loghost 10.255.255.50 channel 4 local-time
+snmp-agent target-host trap address udp-domain 10.255.10.20 params securityname esight v3 privacy
