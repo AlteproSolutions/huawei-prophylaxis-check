@@ -1,0 +1,27 @@
+
+{
+    {
+        "host": 192.168.0.1,
+        "auth_username": administrator,
+        "auth_password": password,
+        "auth_strict_key": False,
+        "platform": "huawei_vrp",
+        "transport": "ssh2"
+    },
+    {
+        "host": 192.168.0.2,
+        "auth_username": test,
+        "auth_password": ADMIN231,
+        "auth_strict_key": False,
+        "platform": "huawei_vrp",
+        "transport": "ssh2"
+    },
+    {
+        "host": 192.168.0.3,
+        "auth_username": admin,
+        "auth_password": ADMIN123,
+        "auth_strict_key": False,
+        "platform": "huawei_vrp",
+        "transport": "ssh2"
+    }
+}

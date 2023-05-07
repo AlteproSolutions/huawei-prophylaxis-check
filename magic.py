@@ -12,26 +12,11 @@ import concurrent.futures
 import pandas as pd
 from tqdm.contrib.concurrent import thread_map
 from netmiko.ssh_autodetect import SSHDetect
+import logging
 
-#Cisco Catalyst variables
-CiscoCatalystAccessInterfaceDistinguisher = "switchport mode access"
-CiscoCatalystTrunkInterfaceDistinguisher = "switchport mode trunk"
-CiscoCatalystHybridInterfaceDistinguisher = "switchport trunk native vlan"
 
-#Cisco SMB Variables
-CiscoSmbAccessInterfaceDistinguisher = "switchport mode access"
-CiscoSmbTrunkInterfaceDistinguisher = "switchport mode trunk"
-
-#Huawei CE Variables
-HuaweiCeAccessInterfaceDistinguisher = "port link-type access"
-HuaweiCeTrunkInterfaceDistinguisher = "port link-type trunk"
-HuaweiCeHybridInterfaceDistinguisher = "port trunk pvid vlan"
-
-#Huawei S Variables
-HuaweiSAccessInterfaceDistinguisher = "port link-type access"
-HuaweiSTrunkInterfaceDistinguisher = "port link-type trunk"
-HuaweiSHybridInterfaceDistinguisher = "port link-type hybrid"
-
+# Initialize logging
+logging.basicConfig(filename='magic.log', filemode='w', format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 def autodetect_device(host, username, password):
     device = {
@@ -47,11 +32,10 @@ def autodetect_device(host, username, password):
     print(guesser.potential_matches) # Dictionary of the whole matching result
 
 
-
-
 def create_inventory(hosts, username, password):
 
     inventory = []
+
 
     for host in hosts:
         inventory.append({
@@ -62,32 +46,28 @@ def create_inventory(hosts, username, password):
             "platform": "huawei_vrp",
             "transport": "ssh2"
         })
+
     return inventory
 
-def perform_live_checks(device_connection):
-    live_checks = {}
 
-    # Check no BPDU error-down
-    response = device_connection.send_command("display error-down recovery")
-    output = response.result
-    live_checks["check_no_bpdu_error_down"] = "Info: No error-down interface exists." in output
-
-    # Check NTP status
-    response = device_connection.send_command("display ntp status | include clock status")
-    output = response.result
-    live_checks["check_ntp_status_synchronized"] = "clock status: synchronized" in output
-
-    # Check HTTP status
-    response = device_connection.send_command("display http server")
-    output = response.result
-    live_checks["check_http_status_disabled"] = "HTTP Server Status              : disabled" and "HTTP Secure-server Status       : disabled" in output
-
-    return live_checks
+def connect_to_device(device):
+    try:
+        conn = Scrapli(**device)
+        conn.open()
+        return conn
+    
+    except ScrapliException as e:
+        logging.error(f"ScrapliException: {e}")
+        
 
 
-def connect(device):
-    device_connection = Scrapli(**device).open()
-    return device_connection
+def get_config(connected_device):
+    try:
+        return connected_device.send_command("display current-configuration").result
+
+    except ScrapliException as e:
+        logging.error(f"ScrapliException: {e}")
+        
 
 
 def get_hostname(config):
@@ -95,7 +75,34 @@ def get_hostname(config):
         if line.startswith("sysname"):
             hostname = line.split()[1]
             return hostname
-    return None
+    return "HOSTNAME_NOT_FOUND"
+
+
+def perform_live_checks(device_connection):
+
+    live_checks = {}
+
+    try:
+        # Check no BPDU error-down
+        response = device_connection.send_command("display error-down recovery")
+        output = response.result
+        live_checks["check_no_bpdu_error_down"] = "Info: No error-down interface exists." in output
+
+        # Check NTP status
+        response = device_connection.send_command("display ntp status | include clock status")
+        output = response.result
+        live_checks["check_ntp_status_synchronized"] = "clock status: synchronized" in output
+
+        # Check HTTP status
+        response = device_connection.send_command("display http server")
+        output = response.result
+        live_checks["check_http_status_disabled"] = "HTTP Server Status              : disabled" and "HTTP Secure-server Status       : disabled" in output
+
+    except ScrapliException as e:
+        logging.error(f"ScrapliException: {e}")
+
+    return live_checks
+
 
 def check_config(parsed_config, global_lines_to_check):
 
@@ -135,6 +142,9 @@ def check_interfaces_config(parsed_config, interface_filter, interfaces_lines_to
 
 
 def save_to_excel(data, output_file):
+
+    print("\nSaving data to excel file ...")
+
     # Create a new workbook
     wb = Workbook()
     ws1 = wb.active
@@ -178,32 +188,16 @@ def save_to_excel(data, output_file):
     row_num = 2
     for device in data:
         for ip, info in device.items():
-            for iface, iface_info in info['interfaces_check'].items():
+            for interface, interface_info in info['interfaces_check'].items():
                 ws2.cell(row=row_num, column=1).value = ip
                 ws2.cell(row=row_num, column=2).value = info['hostname']
-                ws2.cell(row=row_num, column=3).value = iface
+                ws2.cell(row=row_num, column=3).value = interface
                 for col_num, header in enumerate(headers[3:], 4):
-                    ws2.cell(row=row_num, column=col_num).value = iface_info.get(header, None)
+                    ws2.cell(row=row_num, column=col_num).value = interface_info.get(header, None)
                 row_num += 1
 
     # Save the workbook to a file
     wb.save(output_file)
-
-
-def connect_to_device(device):
-    try:
-        conn = Scrapli(**device)
-        conn.open()
-        return conn
-    except Exception as e:
-        pass
-
-def get_config(connected_device):
-    try:
-        return connected_device.send_command("display current-configuration").result
-
-    except Exception as e:
-        pass    
 
 
 def process_device(device, global_lines_to_check, interfaces_lines_to_check, interfaces_filter, commands_to_get_output):
@@ -214,6 +208,7 @@ def process_device(device, global_lines_to_check, interfaces_lines_to_check, int
         hostname = get_hostname(device_config)
         ip = device.get("host")
         device_path = f"{absolute_path}/output/{hostname}_" + f'({ip})'
+        confparse = CiscoConfParse(device_config.splitlines())
 
         if not os.path.exists(device_path): os.mkdir(device_path)
         
@@ -222,10 +217,11 @@ def process_device(device, global_lines_to_check, interfaces_lines_to_check, int
             print(f"\nConfig saved for {device}")
 
     except Exception as e:
+        logging.error(f"Failed when getting config from {device}, error: {e}")
         print(f"\nFailed when getting config from {device}, error: {e}")
-        
-    confparse = CiscoConfParse(device_config.splitlines())
+        return
 
+    #Get commands and save the output
     for command in commands_to_get_output:
         try:
             response = conn.send_command(command)
@@ -233,18 +229,23 @@ def process_device(device, global_lines_to_check, interfaces_lines_to_check, int
             with open(f'{device_path}/{command.strip().replace(" ", "_")}-{hostname}_({ip}).txt', mode="w") as commandfile:
                 commandfile.write(response.result)
 
-        except:
+        except ScrapliException as e:
+            logging.error(f"ScrapliException: {e}")
             print("Device " + hostname + f' ({ip}) - failed when getting ' + command)
 
+
     #Perform config and live checks
+    print("Performing config and live checks for device", hostname)
+
     live_checks = perform_live_checks(conn)
     config_checks = check_config(confparse, global_lines_to_check)
     interfaces_check = check_interfaces_config(confparse, interfaces_filter, interfaces_lines_to_check)
 
+    conn.close()
+
     checks_results = {}
     checks_results.update(live_checks)
     checks_results.update(config_checks)
-
 
     device_data = {
         ip: {
@@ -254,30 +255,37 @@ def process_device(device, global_lines_to_check, interfaces_lines_to_check, int
             'interfaces_check': interfaces_check,
         }
     }
-    #rprint(device_data)
-    inspect(device_data)
-
 
     return device_data
 
 
+def process_device_with_args(args):
+        return process_device(*args)
+
 
 if __name__ == "__main__":
 
-    def process_device_with_args(args):
-        return process_device(*args)
-
-    # Load Environment Variables
+    #Load environment variables
     absolute_path = os.path.dirname(os.path.realpath(__file__))
     load_dotenv(absolute_path + "/.env")
+
+    #Load config
+    UseNetmikoAutodetect = False
+
+
+
     username = os.environ.get("USER")
-    password = os.environ.get("PASSWORD")
+    password = os.environ.get("PASSWORD")    # Load Environment Variables
     
     if (username or password) is None:
-        print('U need to create .env file in root directory of the script and add USER = "YOURUSER" and PASSWORD = "YOURPASSWORD"')
+        print('U need to fill the .env file in root directory of the script and add USER = "YOURUSER" and PASSWORD = "YOURPASSWORD"')
         sys.exit(1)
 
-    #Create output folder
+
+
+
+
+    # Create output folder
     if not os.path.exists(f'{absolute_path}/output'): os.mkdir(f'{absolute_path}/output')
 
     # Read hosts
@@ -296,7 +304,7 @@ if __name__ == "__main__":
     with open(f'{absolute_path}/config/interface_lines_to_check.txt', mode="r") as f:
         interface_lines_to_check = f.read().splitlines()
 
-    #Regex filter for interfaces
+    # Regex filter for interfaces
     with open(f'{absolute_path}/config/regex_interfaces_filter.txt', mode="r") as f:
         interfaces_filter = f.read().strip()
     
@@ -304,6 +312,8 @@ if __name__ == "__main__":
     print("Commands: ", commands_to_get_ouput)
     print("Interfaces filter: ", interfaces_filter)
     print("Devices : ", list(map(lambda x:x.strip(),hosts)))
+
+
 
     inventory = create_inventory(hosts, username, password)
 
@@ -322,6 +332,11 @@ if __name__ == "__main__":
         desc="Processing devices",
         unit="device",
     )
-            
+
+    # Filter out None values from the devices_data list
+    devices_data = [device for device in devices_data if device is not None]
+    
     save_to_excel(devices_data, absolute_path + "/output/commands_check.xlsx")
+
+    print("Script has finished")
 
